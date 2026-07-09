@@ -1,0 +1,4 @@
+node_modules
+.cursor
+.vscode
+_transformed
