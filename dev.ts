@@ -2,47 +2,43 @@
  * Unified dev server for bun-inspector-poc.
  *
  * A single `bun dev` command:
- *   1. Pre-transforms src/ → _transformed/src/ (injects data-insp-path attrs)
+ *   1. Uses the bun-js-beforeparse native NAPI bridge to inline-transform
+ *      .tsx/.jsx files with data-insp-path attributes inside Bun's bundler pipeline
  *   2. Spawns `bunx dev-inspector-server` as a background child process
  *   3. Starts Bun's fullstack dev server with HMR on port 3000
- *   4. Watches src/ for changes and re-transforms on save
- *   5. Terminates the inspector server child when the dev server is killed
+ *   4. Terminates the inspector server child when the dev server is killed
+ *
+ * NO pre-transform folder. NO separate watcher. The transform is inline.
  *
  * Usage:
  *   bun dev         (runs this file via package.json "dev" script)
  *   bun run dev.ts  (same)
  *
- * WHY THERE'S NO onLoad PLUGIN
+ * HOW THE NATIVE BRIDGE WORKS
  * ────────────────────────────
- * Bun 1.3.x JS bundler plugins do NOT fire onLoad/onResolve for native file
- * types (.tsx, .jsx) inside Bun.build(). Only NAPI (C/Zig/Rust) plugins can
- * intercept those via the onBeforeParse hook. So we pre-transform sources to a
- * _transformed/ directory before Bun bundles them. Bun bundles the augmented
- * sources normally — the data-insp-path JSX attributes survive Bun's own
- * JSX compilation intact.
+ * Bun 1.3.x JS bundler plugins cannot intercept .tsx/.jsx files via onLoad.
+ * Only NAPI native plugins can use onBeforeParse for native file types.
  *
- * RUNTIME PLUGIN NOTE
- * ────────────────────
- * Bun.plugin() onLoad DOES fire in the runtime module loader (bun run).
- * It just doesn't fire in Bun.build() / Bun.serve(). The pre-transform
- * produces identical output, so the end result is the same.
+ * bun-js-beforeparse is a Rust NAPI module that provides a ThreadsafeFunction
+ * bridge: Bun calls the native C hook on worker threads → the hook posts source
+ * + path to the JS main thread via TSFN → the JS callback transforms → result
+ * goes back through a sync channel to the worker → Bun uses the transformed source.
+ *
+ * From the user's perspective: jsBridge(asyncFn) returns the native descriptor
+ * for build.onBeforeParse — no Rust code needed per project.
  */
 
 import { serve } from "bun";
-import { watchTransforms, transformAll } from "./scripts/pre-transform";
-import homepage from "./_transformed/index.html";
+import { transformCode } from "@code-inspector/core";
+import { jsBridge, releaseBridge } from "../bun-js-beforeparse/js/index.ts";
+import homepage from "./index.html";
 
-// ─── Step 1: pre-transform sources ─────────────────────────────────────────
+// ─── Step 1: spawn dev-inspector-server ────────────────────────────────────
+//
+// Uses process.execPath (the running Bun binary) — works regardless of PATH.
+// The child inherits stdio so its logs appear inline in this terminal.
 
 console.log("\n[dev] Starting bun-inspector-poc...\n");
-const transformedFiles = await transformAll();
-console.log("");
-
-// ─── Step 2: spawn dev-inspector-server ────────────────────────────────────
-//
-// Uses process.execPath (the running Bun binary) so this works regardless of
-// whether the user has `bun` on their PATH. `bun x <pkg>` is the bunx command.
-// The child inherits stdio so its logs appear inline in this terminal.
 
 const inspectorServer = Bun.spawn(
   [process.execPath, "x", "@mcpc-tech/unplugin-dev-inspector-mcp", "server"],
@@ -56,42 +52,65 @@ const inspectorServer = Bun.spawn(
 );
 
 // Forward SIGINT / SIGTERM to the child so it shuts down cleanly
-const cleanup = () => {
-  inspectorServer.kill();
-};
-process.on("SIGINT", cleanup);
-process.on("SIGTERM", cleanup);
+process.on("SIGINT", () => inspectorServer.kill());
+process.on("SIGTERM", () => inspectorServer.kill());
 
-// Wait briefly for the inspector server to initialize before starting the app
-// (gives it time to print its banner and write MCP configs)
+// Wait briefly for the inspector server to initialize
 await Bun.sleep(1500);
+
+// ─── Step 2: create the onBeforeParse bridge ────────────────────────────────
+//
+// jsBridge() returns a descriptor for build.onBeforeParse().
+// The transform is the same @code-inspector/core call used by the
+// library's own Webpack/Turbopack loader (src/loader.ts).
+//
+// CONSTRAINT: transformCode() must resolve synchronously through the JS
+// microtask queue (CPU-only Babel transform, no I/O). Do NOT use async I/O
+// inside this callback — it would deadlock with the blocking worker thread.
+
+const inspectBridge = jsBridge(async (source: string, path: string) => {
+  if (path.includes("node_modules")) return source;
+  try {
+    return await transformCode({
+      content: source,
+      filePath: path,
+      fileType: "jsx", // @code-inspector/core uses "jsx" for both .jsx and .tsx
+      escapeTags: [],
+      pathType: "absolute",
+    });
+  } catch {
+    return source; // fall back to original on transform error
+  }
+});
 
 // ─── Step 3: start Bun fullstack dev server with HMR ───────────────────────
 //
-// Serves _transformed/index.html whose <script> points at the pre-augmented
-// sources in _transformed/src/. Bun bundles those normally.
-// HMR is Bun's own transparent hot reloading — no import.meta.hot needed
-// in the inspector client (it's guarded by window.__DEV_INSPECTOR_LOADED__).
+// Registers the native onBeforeParse bridge as a plugin.
+// Bun bundles index.html → src/index.tsx; the bridge intercepts all .tsx/.jsx
+// files and injects data-insp-path="file:line:col:tag" attributes inline.
+// HMR is Bun's own transparent hot reloading.
 
 const app = serve({
   routes: {
     "/": homepage,
   },
+  plugins: [
+    {
+      name: "dev-inspector-transform",
+      setup(build) {
+        build.onBeforeParse(
+          { filter: /\.[jt]sx$/, namespace: "file" },
+          inspectBridge,
+        );
+      },
+    },
+  ],
   development: {
     hmr: true,
-    // Echoes browser console.log calls to this terminal over the HMR WebSocket.
-    // The inspector also captures console via its own HTTP POST interceptor.
-    console: true,
+    console: true, // echoes browser console to this terminal via HMR WebSocket
   },
   port: 3000,
 });
-
-// ─── Step 4: watch src/ for changes and re-transform ───────────────────────
-//
-// When a source file changes: re-transform it → Bun HMR picks up the new file
-// in _transformed/src/ and hot-reloads the browser automatically.
-
-watchTransforms(transformedFiles);
 
 // ─── Banner ────────────────────────────────────────────────────────────────
 
@@ -100,4 +119,8 @@ console.log(`  App     → http://localhost:${app.port}`);
 console.log(`  MCP     → http://localhost:6137/__mcp__/sse`);
 console.log(`  Inspector → http://localhost:6137/__inspector__/sidebar`);
 console.log(`${"─".repeat(54)}\n`);
-console.log("  HMR + file watching active. Ctrl+C to stop all.\n");
+console.log("  HMR + inline onBeforeParse transform active. Ctrl+C to stop.\n");
+
+// Note: releaseBridge(inspectBridge) would be called on shutdown, but since
+// Bun.serve() keeps the event loop alive anyway, it's not needed here.
+// The bridge only needs releasing in Bun.build() one-shot scripts.

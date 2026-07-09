@@ -18,7 +18,7 @@ export function App() {
       <h1>Bun + dev-inspector-mcp POC</h1>
       <p>
         Click the inspector bar (bottom-right) then click any element to see accurate
-        <code>file:line:col</code> source attribution from the pre-transform step.
+        <code>file:line:col</code> source attribution injected inline by the NAPI bridge.
       </p>
       <Counter label="Alpha" />
       <Counter label="Beta" />
