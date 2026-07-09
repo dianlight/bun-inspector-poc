@@ -1,0 +1,17 @@
+{
+  "name": "bun-inspector-poc",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run dev.ts"
+  },
+  "dependencies": {
+    "@code-inspector/core": "^1.3.0",
+    "@mcpc-tech/unplugin-dev-inspector-mcp": "^0.1.49",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}
