@@ -1,27 +1,17 @@
 /**
- * Unified dev server for bun-inspector-poc.
+ * Simplified dev server for bun-inspector-poc.
  *
  * A single `bun dev` command:
  *   1. Spawns the dev-inspector-mcp server as a background child process
- *   2. Uses bun-js-beforeparse v0.2.0 NAPI bridge + @code-inspector/core to
+ *   2. Uses bun-js-beforeparse NAPI bridge + @code-inspector/core to
  *      transform .tsx/.jsx files with data-insp-path attributes via onBeforeParse
- *      INSIDE Bun's bundler pipeline (no pre-transform to disk)
- *   3. Bundles the source with Bun.build({ development: true, sourcemap: "inline" })
- *      for inline sourcemaps and React DevTools compatibility
- *   4. Serves the bundled output statically on port 3000
- *   5. Watches src/ for changes and rebuilds automatically
- *   6. Terminates the inspector server and dev server cleanly on Ctrl+C
- *
- * WHY Bun.build() INSTEAD OF Bun.serve({ plugins })?
- * ──────────────────────────────────────────────────
- * Bun 1.3.x's serve() silently ignores plugins — setup() is never called.
- * However, Bun.build() fully supports plugins with onBeforeParse, so we build
- * first, then serve the output statically.  The trade-off is no true HMR, but
- * we have a file watcher + manual browser refresh.
+ *   3. Bundles with Bun.build({ development: true, sourcemap: "inline" })
+ *   4. Serves with HMR via WebSocket — auto-rebuilds on file changes
+ *   5. Terminates cleanly on Ctrl+C
  *
  * Usage:
- *   bun dev         (runs this file via package.json "dev" script)
- *   bun run dev.ts  (same)
+ *   bun dev
+ *   bun run dev.ts
  */
 
 import { serve } from "bun";
@@ -30,25 +20,15 @@ import { join } from "path";
 import { transformCode } from "@code-inspector/core";
 import { jsBridge, releaseBridge } from "bun-js-beforeparse";
 
-// ─── Paths ─────────────────────────────────────────────────────────────────
+// ─── Config ──────────────────────────────────────────────────────────────────
 const PROJECT_ROOT = import.meta.dir;
 const SRC_DIR = join(PROJECT_ROOT, "src");
-const OUT_DIR = join(PROJECT_ROOT, "_dev"); // bundled output
-
-// ─── Step 1: spawn dev-inspector-server ────────────────────────────────────
-
-console.log("\n[dev] Starting bun-inspector-poc...\n");
-
-// ─── Agent configuration ────────────────────────────────────────────────
-// Available agents: "Claude Code", "Codex CLI", "Opencode", "Gemini CLI",
-// "Goose", "Cursor Agent", "CodeBuddy Code", "Kimi CLI", "Droid"
-//
-// Prerequisites:
-//   Opencode    → curl -fsSL https://opencode.ai/install | bash
-//   Claude Code → @zed-industries/claude-code-acp (installed as devDep)
-//   Codex CLI   → @zed-industries/codex-acp (optionalDep, installed)
+const OUT_DIR = join(PROJECT_ROOT, "_dev");
 const DEFAULT_AGENT = "Opencode";
 const VISIBLE_AGENTS = "Opencode,Claude Code";
+
+// ─── Step 1: Spawn dev-inspector-mcp server ──────────────────────────────────
+console.log("\n[dev] Starting bun-inspector-poc...\n");
 
 const inspectorServer = Bun.spawn(
   [
@@ -70,48 +50,34 @@ const inspectorServer = Bun.spawn(
   },
 );
 
-// Forward SIGINT / SIGTERM to the child so it shuts down cleanly
 process.on("SIGINT", () => inspectorServer.kill());
 process.on("SIGTERM", () => inspectorServer.kill());
-
-// Wait briefly for the inspector server to initialize
 await Bun.sleep(1500);
 
-// ─── Step 2: create the onBeforeParse bridge ────────────────────────────────
-//
-// jsBridge() wraps an async transform function as a NAPI native plugin descriptor
-// for build.onBeforeParse().  bun-js-beforeparse v0.2.0 properly awaits Promises
-// returned by the callback, so @code-inspector/core's transformCode() works.
-
+// ─── Step 2: Create the onBeforeParse bridge ─────────────────────────────────
 const inspectBridge = jsBridge(async (source: string, path: string) => {
-  // Skip node_modules — they don't need data-insp-path attributes
   if (path.includes("node_modules")) return source;
   try {
     return await transformCode({
       content: source,
       filePath: path,
-      fileType: "jsx", // @code-inspector/core uses "jsx" for both .jsx and .tsx
+      fileType: "jsx",
       escapeTags: [],
       pathType: "absolute",
     });
   } catch {
-    return source; // fall back to original on transform error
+    return source;
   }
 });
 
-// ─── Step 3: bundle with Bun.build() + onBeforeParse bridge ───────────────
-//
-// Uses Bun.build() with the native bridge plugin to intercept .tsx/.jsx files
-// during bundling.  development:true + sourcemap:inline gives us inline
-// sourcemaps that map back to the original source files.
-
-async function bundle(): Promise<void> {
+// ─── Step 3: Bundle ──────────────────────────────────────────────────────────
+async function bundle(): Promise<boolean> {
   mkdirSync(OUT_DIR, { recursive: true });
 
   const entryPath = join(SRC_DIR, "index.tsx");
   if (!existsSync(entryPath)) {
     console.warn("[dev] No entrypoint at src/index.tsx — skipping build");
-    return;
+    return false;
   }
 
   const result = await Bun.build({
@@ -132,20 +98,17 @@ async function bundle(): Promise<void> {
     // @ts-expect-error — development mode is valid at runtime (Bun ≥1.3)
     development: true,
     sourcemap: "inline" as const,
-    // No external — bundle everything inline so the browser can load
-    // the output directly via <script type="module" src="./index.js">
-    // without needing an importmap or serving node_modules.
   });
 
   if (!result.success) {
     for (const log of result.logs || []) {
-      if (log.level === "error") console.error(`[dev] Build error:`, log);
+      if (log.level === "error") console.error("[dev] Build error:", log);
     }
-    return;
+    return false;
   }
 
-  // Write an index.html that loads the bundled JS
-  const htmlContent = `<!doctype html>
+  // Write index.html with HMR client
+  const html = `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -155,35 +118,51 @@ async function bundle(): Promise<void> {
   <body>
     <div id="root"></div>
     <script type="module" src="./index.js"></script>
+    <script>
+      // HMR client — connects to WebSocket and reloads on updates
+      (function connectHMR() {
+        const ws = new WebSocket("ws://localhost:3000/__hmr__");
+        ws.onmessage = (e) => {
+          const data = JSON.parse(e.data);
+          if (data.type === "update") {
+            console.log("[HMR] Rebuilding...");
+            location.reload();
+          }
+        };
+        ws.onclose = () => setTimeout(connectHMR, 1000);
+        ws.onerror = () => ws.close();
+      })();
+    </script>
   </body>
 </html>`;
-  await Bun.write(join(OUT_DIR, "index.html"), htmlContent);
 
-  console.log(`[dev] Bundle complete — ${result.outputs?.length || 0} output(s)`);
+  await Bun.write(join(OUT_DIR, "index.html"), html);
+  console.log(`[dev] Build complete — ${result.outputs?.length || 0} output(s)`);
+  return true;
 }
-
-// ─── Initial build ─────────────────────────────────────────────────────────
 
 await bundle();
 
-// ─── Step 4: start Bun dev server (static file server) ─────────────────────
-//
-// Serves the pre-built output from _dev/.  Since Bun.serve() doesn't support
-// plugins in 1.3.x, we use static file serving + manual rebuilds.
-
+// ─── Step 4: Start server with HMR ──────────────────────────────────────────
 const app = serve({
-  fetch(req) {
+  fetch(req, server) {
     const url = new URL(req.url);
-    // Map root → index.html
+
+    // WebSocket upgrade for HMR
+    if (url.pathname === "/__hmr__") {
+      if (server.upgrade(req)) return undefined;
+      return new Response("WebSocket upgrade failed", { status: 500 });
+    }
+
+    // Serve static files from _dev/
     const relativePath = url.pathname === "/" ? "/index.html" : url.pathname;
     const filePath = join(OUT_DIR, relativePath);
 
-    // Serve static files from _dev/
     if (existsSync(filePath)) {
       return new Response(Bun.file(filePath));
     }
 
-    // Fallback: serve index.html for SPA-like routes (React Router, etc.)
+    // Fallback to index.html for SPA routes
     const indexPath = join(OUT_DIR, "index.html");
     if (existsSync(indexPath)) {
       return new Response(Bun.file(indexPath));
@@ -191,36 +170,41 @@ const app = serve({
 
     return new Response("Not found", { status: 404 });
   },
+  websocket: {
+    open(ws) {
+      ws.subscribe("hmr");
+    },
+    message() {},
+    close() {},
+  },
   port: 3000,
 });
 
-// ─── Step 5: watch src/ for changes → auto-rebuild ────────────────────────
-
+// ─── Step 5: Watch src/ for changes → auto-rebuild + HMR ────────────────────
 let rebuildTimer: Timer | null = null;
 
 async function rebuild(): Promise<void> {
-  console.log("\n[dev] Rebuilding…");
-  await bundle();
-  console.log("[dev] Rebuild complete — refresh the browser\n");
+  console.log("\n[dev] Rebuilding...");
+  const success = await bundle();
+  if (success) {
+    console.log("[dev] Rebuild complete");
+    app.publish("hmr", JSON.stringify({ type: "update" }));
+  }
 }
 
 if (existsSync(SRC_DIR)) {
   watch(SRC_DIR, { recursive: true }, (_event, filename) => {
     if (!filename || !/\.(tsx?|jsx?)$/i.test(filename)) return;
-    // Debounce rapid changes (e.g. editor save → multiple events)
     if (rebuildTimer) clearTimeout(rebuildTimer);
-    rebuildTimer = setTimeout(() => {
-      rebuild().catch(console.error);
-    }, 300);
+    rebuildTimer = setTimeout(() => rebuild().catch(console.error), 300);
   });
 }
 
-// ─── Graceful shutdown ─────────────────────────────────────────────────────
-
+// ─── Graceful shutdown ───────────────────────────────────────────────────────
 function shutdown() {
-  console.log("\n[dev] Shutting down…");
+  console.log("\n[dev] Shutting down...");
   inspectorServer.kill();
-  releaseBridge(inspectBridge); // allow the process to exit cleanly
+  releaseBridge(inspectBridge);
   app.stop(true);
   process.exit(0);
 }
@@ -228,13 +212,11 @@ function shutdown() {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
-// ─── Banner ────────────────────────────────────────────────────────────────
-
+// ─── Banner ──────────────────────────────────────────────────────────────────
 console.log(`\n${"─".repeat(54)}`);
-console.log(`  App      → http://localhost:${app.port}`);
-console.log(`  Rebuild  → auto on src/ changes (refresh browser)`);
-console.log(`  MCP      → http://localhost:6137/__mcp__/sse`);
+console.log(`  App       → http://localhost:${app.port}`);
+console.log(`  HMR       → ws://localhost:${app.port}/__hmr__`);
+console.log(`  MCP       → http://localhost:6137/__mcp__/sse`);
 console.log(`  Inspector → http://localhost:6137/__inspector__/sidebar`);
-console.log(`  Dev      → inline sourcemaps + data-insp-path (onBeforeParse)`);
 console.log(`${"─".repeat(54)}\n`);
 console.log("  Ctrl+C to stop.\n");
