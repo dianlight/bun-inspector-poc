@@ -1,6 +1,3 @@
 node_modules
 .cursor
 .vscode
-_transformed
-_dev
-_dev_src
