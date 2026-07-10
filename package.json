@@ -7,11 +7,15 @@
     "dev": "bun run dev.ts"
   },
   "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
     "@code-inspector/core": "^1.3.0",
     "@mcpc-tech/unplugin-dev-inspector-mcp": "^0.1.49",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "bun-js-beforeparse": "0.2.0",
+    "@types/bun": "^1.3.14"
   }
 }

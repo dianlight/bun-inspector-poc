@@ -5,3 +5,7 @@
 #
 # [serve.static]
 # plugins = ["./inspector-plugin-default.ts"]
+
+# Inline sourcemaps for the dev server so @code-inspector/core transformed
+# output maps back to original source files in the devtools sidebar.
+sourcemap = "inline"
