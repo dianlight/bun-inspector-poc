@@ -45,7 +45,7 @@ function StatusBar() {
   return (
     <footer style={{
       position: "fixed",
-      bottom: 0,
+      top: 0,
       left: 0,
       right: 0,
       display: "flex",
@@ -83,7 +83,8 @@ function StatusIndicator({ label, status }: { label: string; status: string }) {
 export function App() {
   return (
     <>
-      <main style={{ fontFamily: "sans-serif", maxWidth: 480, margin: "4rem auto", paddingBottom: 60 }}>
+      <StatusBar />
+      <main style={{ fontFamily: "sans-serif", maxWidth: 480, margin: "4rem auto", paddingTop: 60 }}>
         <h1>Bun + dev-inspector-mcp POC</h1>
         <p>
           Click the inspector bar (bottom-right) then click any element to see accurate
@@ -92,7 +93,6 @@ export function App() {
         <Counter label="Alpha" />
         <Counter label="Beta" />
       </main>
-      <StatusBar />
     </>
   );
 }

@@ -1,11 +1,2 @@
-# NOTE: bunfig.toml [serve.static] plugins require a module with a DEFAULT export.
-# For the Bun.serve() JS API (our dev.ts approach), use Bun.plugin() directly instead.
-# This bunfig.toml approach is for `bun build` CLI usage only.
-# See: inspector-plugin-default.ts for a CLI-compatible variant.
-#
-# [serve.static]
-# plugins = ["./inspector-plugin-default.ts"]
-
-# Inline sourcemaps for the dev server so @code-inspector/core transformed
-# output maps back to original source files in the devtools sidebar.
-sourcemap = "inline"
+[serve.static]
+plugins = ["./inspector-plugin-default.ts"]
