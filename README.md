@@ -27,22 +27,19 @@ ready for AI agent connections (Claude Code, Cursor, VS Code MCP, etc.).
 ## How it works
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  bun dev   (single command, runs dev.ts)                    │
-│                                                             │
-│  ① pre-transform src/ → _transformed/src/                  │
-│     injects data-insp-path="file:line:col:tag" via          │
-│     @code-inspector/core (same as Vite/Turbopack path)      │
-│                                                             │
-│  ② Bun.spawn → dev-inspector-server (port 6137)            │
-│     serves inspector UI, MCP SSE endpoint, ACP chat        │
-│                                                             │
-│  ③ Bun.serve(_transformed/index.html, { hmr: true })       │
-│     Bun bundles _transformed/src/ normally (port 3000)     │
-│                                                             │
-│  ④ watchFile — re-transforms src/ changes on save          │
-│     Bun HMR picks up _transformed/src/ automatically       │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  bun dev   (single command, runs dev.ts)                        │
+│                                                                 │
+│  ① Bun.spawn → dev-inspector-server (port 6137)                │
+│     serves inspector UI, MCP SSE endpoint, ACP chat            │
+│                                                                 │
+│  ② jsBridge(transformCode) → onBeforeParse NAPI plugin         │
+│     injects data-insp-path="file:line:col:tag" inline,          │
+│     inside Bun's bundler pipeline (no _transformed/ folder)     │
+│                                                                 │
+│  ③ Bun.serve(index.html, { plugins, hmr: true })               │
+│     Bun bundles src/ normally, transform runs per-file          │
+└─────────────────────────────────────────────────────────────────┘
 
 Browser:
   <DevInspector/> in src/index.tsx
@@ -51,26 +48,54 @@ Browser:
     → click element → reads data-insp-path attr → resolves file:line:col
 ```
 
-### Why a pre-transform step instead of an onLoad plugin?
+### How the inline transform works
 
-Bun 1.3.x JS bundler plugins (`Bun.build`) do **not** fire `onLoad`/`onResolve` for
-native file types (`.tsx`, `.jsx`, `.ts`, `.js`). That hook is only triggered for
-custom file extensions or virtual modules. Intercepting native types requires a **NAPI
-(C/Zig/Rust) native plugin** via `onBeforeParse` — not available from pure JavaScript.
+Bun 1.3.x JS bundler plugins (`onLoad`/`onResolve`) **cannot** intercept native file
+types (`.tsx`, `.jsx`). Only NAPI native modules can, via the `onBeforeParse` hook.
 
-> **Note:** `Bun.plugin()` *does* fire `onLoad` in the **runtime module loader**
-> (`bun run`), just not in `Bun.build()` / `Bun.serve()`. So the pre-transform
-> produces the exact same result.
+[`bun-js-beforeparse`](../bun-js-beforeparse/) is a Rust NAPI module that bridges this
+gap: it exposes a `jsBridge(fn)` function that wraps any TypeScript callback and
+registers it as a real `onBeforeParse` native hook. No Rust code is needed per project.
 
-The pre-transform is a one-time step at startup, then a lightweight file-watcher. It
-does not add a separate terminal or manual command — `dev.ts` orchestrates everything.
+```
+Bun worker thread (native)           JS main thread
+──────────────────────────           ──────────────
+bun_js_bridge_dispatch()             TSFN callback fires
+  read source (zero-copy)              calls transformCode(source, path)
+  create SyncChannel(0)                result sent through channel
+  tsfn.call_with_return_value() ──────────────────────────────────────
+  blocks on rx.recv()  ←─────────────── tx.send(transformed)
+  set_output_source_code()
+```
+
+`dev.ts` registers it as:
+
+```ts
+const inspectBridge = jsBridge(async (source, path) => {
+  return await transformCode({ content: source, filePath: path, fileType: "jsx", ... });
+});
+
+Bun.serve({
+  plugins: [{
+    name: "dev-inspector-transform",
+    setup(build) {
+      build.onBeforeParse({ filter: /\.[jt]sx$/ }, inspectBridge);
+    },
+  }],
+  ...
+});
+```
+
+`transformCode()` (from `@code-inspector/core`) is a CPU-only Babel transform — safe to
+`await` inside the bridge because its Promise resolves through microtasks without
+yielding the event loop.
 
 ### Why no import.meta.hot / HMR API calls?
 
-The library doesn't use `import.meta.hot` or `module.hot` anywhere. The inspector UI
-is injected via a `<script>` tag loaded from port 6137 — outside Bun's HMR graph
-entirely. Injection is idempotent (guarded by `window.__DEV_INSPECTOR_LOADED__` and
-`customElements.get()`), so Bun's HMR never double-mounts.
+The library has zero uses of `import.meta.hot` or `module.hot`. The inspector UI is
+injected via a `<script>` tag loaded from port 6137 — entirely outside Bun's HMR graph.
+Injection is idempotent (guarded by `window.__DEV_INSPECTOR_LOADED__` and
+`customElements.get()`), so Bun's HMR never double-mounts the inspector.
 
 ---
 
@@ -78,48 +103,49 @@ entirely. Injection is idempotent (guarded by `window.__DEV_INSPECTOR_LOADED__` 
 
 ```
 bun-inspector-poc/
-├── dev.ts                      ← single dev command (orchestrator)
-├── index.html                  ← original HTML (not served in dev, kept for reference)
+├── dev.ts                  ← single dev command: spawns inspector server +
+│                              registers NAPI bridge + starts Bun.serve()
+├── index.html              ← HTML entry point (served directly — no generated copy)
 ├── src/
-│   ├── index.tsx               ← app entry; mounts <DevInspector/>
-│   └── App.tsx                 ← demo React components
-├── _transformed/               ← generated; gitignore this
-│   ├── index.html              ← HTML served by Bun (script points at _transformed/src/)
-│   └── src/                    ← JSX/TSX with data-insp-path attrs injected
-├── scripts/
-│   └── pre-transform.ts        ← transform library + standalone CLI
-├── inspector-plugin.ts         ← Bun onLoad plugin (for runtime use; not Bun.build)
-├── inspector-plugin-default.ts ← default-export wrapper (for bunfig.toml plugins)
-├── bunfig.toml                 ← commented out; see Bun plugin limitations below
+│   ├── index.tsx           ← app entry; mounts <DevInspector host="localhost" port={6137}/>
+│   └── App.tsx             ← demo React components
+├── inspector-plugin.ts     ← Bun runtime onLoad plugin (bun run context only, not bundler)
+├── bunfig.toml             ← plugin stanza commented out (see limitations below)
 └── package.json
+```
+
+**Dependencies on the sibling package:**
+
+```ts
+// dev.ts imports from the local bun-js-beforeparse package
+import { jsBridge } from "../bun-js-beforeparse/js/index.ts";
 ```
 
 ---
 
 ## The three moving parts explained
 
-### 1. JSX source transform — `scripts/pre-transform.ts`
+### 1. JSX source transform — via `bun-js-beforeparse` + `@code-inspector/core`
 
-Uses `@code-inspector/core`'s `transformCode()` — the same function used by the
-library's own Webpack/Turbopack loader (`loader.ts`). It injects attributes like:
+`transformCode()` injects `data-insp-path` attributes into every JSX element:
 
 ```tsx
-// Input
+// Input (src/App.tsx)
 <button onClick={...}>Increment</button>
 
-// Output
+// Output (as seen by Bun's bundler, inline — no files written)
 <button onClick={...} data-insp-path="/abs/path/src/App.tsx:10:7:button">
   Increment
 </button>
 ```
 
-The client reads these at runtime in `sourceDetector.ts`. When you click an element
-in the inspector, it walks up the DOM reading `data-insp-path` and reports the exact
-`file:line:col` back to the MCP server, which an AI agent then uses to open the file.
+The client reads these at runtime in `sourceDetector.ts`. When you click an element in
+the inspector, it walks the DOM reading `data-insp-path` and reports `file:line:col` back
+to the MCP server, which an AI agent uses to open the exact line in your editor.
 
-**Fallback without the transform:** if you skip the pre-transform, the inspector still
-works via React Fiber detection — it finds the owning component by name from the React
-internal fiber tree. Less precise (component name, not line), but zero build changes.
+**Fallback without the transform:** the inspector still works via React Fiber detection —
+it finds the owning component by name. Less precise (component name, not line number), but
+requires zero build configuration.
 
 ### 2. UI injection — `src/index.tsx`
 
@@ -134,18 +160,18 @@ root.render(
 );
 ```
 
-`DevInspector` (from the `/next` export, `src/next.tsx` in the library) is a plain
-React 19 component that runs in a `useEffect`:
+`DevInspector` (from the library's `/next` export, `src/next.tsx`) is a plain React 19
+component that runs in a `useEffect`:
 
 1. Sets `window.__DEV_INSPECTOR_CONFIG__` (host/port, read by the inspector client)
 2. Appends `<dev-inspector-mcp>` custom element to `document.body`
 3. Injects `<script type="module" src="http://localhost:6137/__inspector__/inspector.js">`
 
-It does **not** import from Vite or Next.js — it's a bundler-agnostic component.
+It has no Vite or Next.js dependency — it is bundler-agnostic.
 
 ### 3. Standalone server — auto-started by `dev.ts`
 
-`dev.ts` spawns the standalone inspector server via:
+`dev.ts` spawns the inspector server at startup:
 
 ```ts
 const inspectorServer = Bun.spawn(
@@ -154,9 +180,8 @@ const inspectorServer = Bun.spawn(
 );
 ```
 
-`process.execPath` is the current Bun binary path — more reliable than relying on
-`bunx` being on PATH. The server starts on port 6137 (auto-increments if taken) and
-provides:
+`process.execPath` is the running Bun binary — more reliable than relying on `bunx`
+being on PATH. The server starts on port 6137 (auto-increments if taken) and provides:
 
 | Endpoint | Purpose |
 |---|---|
@@ -217,70 +242,37 @@ Restart Cursor/VS Code to pick it up, or point manually:
 
 ---
 
-## Bun bundler plugin limitations (documented here for reference)
+## Bun bundler plugin notes
 
-> **TL;DR:** You don't need to do anything — `dev.ts` handles it. This section
-> explains *why* the approach works the way it does.
+### `onLoad` does not fire for native file types
 
-### Why `inspector-plugin.ts` is not used in `Bun.serve()`
+JS plugins registered with `Bun.plugin()` or `Bun.build({ plugins })` do **not** fire
+`onLoad`/`onResolve` for `.tsx`, `.jsx`, `.ts`, `.js` — only for custom extensions.
+`inspector-plugin.ts` in this repo is a correct implementation, but it only works in the
+**Bun runtime module loader** (`bun run`), not inside the bundler used by `Bun.serve()`.
 
-`inspector-plugin.ts` is a correct Bun `BunPlugin` implementation that would intercept
-`.tsx`/`.jsx` files and call `transformCode()`. It works perfectly in `bun run`
-(the runtime module loader). But `Bun.build()` and `Bun.serve()` — which drive the
-browser bundle — do **not** fire `onLoad`/`onResolve` for native file types.
-
-This was verified empirically: even with a `console.log` inside the `onLoad` callback,
-no output appeared during `Bun.build({ entrypoints: ['./src/App.tsx'] })`.
-
-The root cause: Bun's built-in loaders for `.tsx`, `.jsx`, `.ts`, `.js` bypass the JS
-plugin hook entirely. Only the low-level `onBeforeParse` hook (NAPI modules only) can
-intercept them. This is documented in Bun 1.2 release notes as a native-only feature.
+`bun-js-beforeparse` solves this by providing a native `onBeforeParse` hook that does
+intercept these file types, and bridging it to any JS callback via a ThreadsafeFunction.
 
 ### `bunfig.toml` `[serve.static] plugins`
 
-This feature also requires a **default export** (not a named export), and has the same
-limitation: it doesn't intercept native file types in the bundler. The `bunfig.toml`
-in this repo has the stanza commented out to avoid the misleading error.
-
-### `inspector-plugin-default.ts`
-
-A thin default-export re-export for use with `Bun.build({ plugins: [...] })` or
-`bunfig.toml` when you want to intercept *non-native* file types in a build step.
-
-### Future: when Bun exposes onBeforeParse from JavaScript
-
-If Bun ever makes `onBeforeParse` accessible from JS plugins (not just NAPI), the
-`inspector-plugin.ts` approach would work without any pre-transform step. The plugin
-could be registered as:
-
-```ts
-Bun.plugin({
-  name: "dev-inspector",
-  setup(build) {
-    build.onBeforeParse({ filter: /\.(tsx|jsx)$/ }, async (args) => {
-      // hypothetical JS-accessible hook
-      return { contents: await transformCode({ content: args.contents, ... }) };
-    });
-  },
-});
-```
+The `bunfig.toml` stanza is commented out. It requires a **default export** module, and
+has the same native-type limitation as JS `onLoad`. The NAPI bridge registered directly
+in `dev.ts` via `Bun.serve({ plugins })` is the working solution.
 
 ---
 
-## What would "first-class" Bun support in the library look like?
+## What first-class library support would look like
 
-If this pattern were upstreamed to `@mcpc-tech/unplugin-dev-inspector-mcp`, it would
-add:
+If this pattern were upstreamed to `@mcpc-tech/unplugin-dev-inspector-mcp`, it would add:
 
-1. A `bunDevInspector(options)` export — mirrors the existing `turbopackDevInspector()`
-   at `src/turbopack.ts:134`. It calls `startStandaloneServer()` and returns the
-   pre-transform script path for users to reference.
+1. A `bunDevInspector(options)` export bundling `jsBridge(transformCode)` +
+   `startStandaloneServer()` — mirrors the existing `turbopackDevInspector()` pattern
+   in `src/turbopack.ts:134`.
 
 2. `"bun"` added to `BundlerType` in `src/commands/setup/types.ts` and a new
-   `src/commands/setup/frameworks/bun.ts` with `detectBunConfig` / `transformBunConfig`
-   — so `npx dev-inspector setup` auto-wires a Bun project.
-
-3. The pre-transform logic moved into the package itself so users don't copy scripts.
+   `src/commands/setup/frameworks/bun.ts` — so `npx dev-inspector setup` auto-wires a
+   Bun project's config.
 
 For now, this POC is the complete working recipe.
 
@@ -289,19 +281,24 @@ For now, this POC is the complete working recipe.
 ## Troubleshooting
 
 **Inspector bar doesn't appear**
-- Check that port 6137 is free before starting: `lsof -i :6137`
-- Verify the inspector server started: `curl http://localhost:6137/ping` → `pong`
+- Check port 6137 is free: `lsof -i :6137`
+- Verify the server started: `curl http://localhost:6137/ping` → `pong`
 - Check browser console for errors loading `/__inspector__/inspector.js`
 
 **Click-to-source shows component name, not file:line**
-- The `_transformed/` directory may be stale. Delete it and re-run `bun dev`.
-- Verify: `grep -r "data-insp-path" _transformed/src/` — should show absolute paths.
+- Verify the NAPI bridge is running: the terminal should show transform calls during startup
+- Check `bun-js-beforeparse.linux-x64-gnu.node` (or the correct platform variant) exists in `../bun-js-beforeparse/`
+- Rebuild the native module if needed: `cd ../bun-js-beforeparse && bun run build:debug`
 
 **MCP connection refused in Claude Code / Cursor**
 - The server URL is `http://localhost:6137/__mcp__/sse` (SSE transport).
 - Some editors require restarting after `.cursor/mcp.json` is written.
-- Try: `curl -s http://localhost:6137/__mcp__/sse` — should keep the connection open.
+- Verify: `curl -N http://localhost:6137/__mcp__/sse` — should hold the connection open.
 
 **Port 6137 already in use**
 - The server auto-increments: check the console banner for the actual port.
 - Set a custom port: `DEV_INSPECTOR_PORT=6200 bun dev`
+
+**Process hangs after a one-shot `Bun.build()` call**
+- Call `releaseBridge(descriptor)` after the build to unref the TSFN. Not needed for
+  `Bun.serve()` since the server itself keeps the event loop alive.
