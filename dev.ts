@@ -39,8 +39,28 @@ const OUT_DIR = join(PROJECT_ROOT, "_dev"); // bundled output
 
 console.log("\n[dev] Starting bun-inspector-poc...\n");
 
+// ─── Agent configuration ────────────────────────────────────────────────
+// Available agents: "Claude Code", "Codex CLI", "Opencode", "Gemini CLI",
+// "Goose", "Cursor Agent", "CodeBuddy Code", "Kimi CLI", "Droid"
+//
+// Prerequisites:
+//   Opencode    → curl -fsSL https://opencode.ai/install | bash
+//   Claude Code → @zed-industries/claude-code-acp (installed as devDep)
+//   Codex CLI   → @zed-industries/codex-acp (optionalDep, installed)
+const DEFAULT_AGENT = "Opencode";
+const VISIBLE_AGENTS = "Opencode,Claude Code";
+
 const inspectorServer = Bun.spawn(
-  [process.execPath, "x", "@mcpc-tech/unplugin-dev-inspector-mcp", "server"],
+  [
+    process.execPath,
+    "x",
+    "@mcpc-tech/unplugin-dev-inspector-mcp",
+    "server",
+    "--default-agent",
+    DEFAULT_AGENT,
+    "--visible-agents",
+    VISIBLE_AGENTS,
+  ],
   {
     cwd: process.cwd(),
     stdin: "inherit",

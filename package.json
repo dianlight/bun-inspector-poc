@@ -13,9 +13,13 @@
   "devDependencies": {
     "@code-inspector/core": "^1.3.0",
     "@mcpc-tech/unplugin-dev-inspector-mcp": "^0.1.49",
+    "@types/bun": "^1.3.14",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "bun-js-beforeparse": "0.2.0",
-    "@types/bun": "^1.3.14"
+    "@zed-industries/claude-code-acp": "^0.16.2",
+    "bun-js-beforeparse": "0.2.0"
+  },
+  "patchedDependencies": {
+    "@mcpc-tech/unplugin-dev-inspector-mcp@0.1.49": "patches/@mcpc-tech%2Funplugin-dev-inspector-mcp@0.1.49.patch"
   }
 }
