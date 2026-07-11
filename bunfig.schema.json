@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "serve": {
+      "type": "object",
+      "properties": {
+        "port": { "type": "integer" },
+        "static": {
+          "type": "object",
+          "properties": {
+            "plugins": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "test": { "type": "object", "additionalProperties": true },
+    "install": { "type": "object", "additionalProperties": true },
+    "preload": { "type": "array", "items": { "type": "string" } },
+    "jsx": { "type": "string" },
+    "jsxFactory": { "type": "string" },
+    "jsxFragment": { "type": "string" },
+    "jsxImportSource": { "type": "string" },
+    "smol": { "type": "boolean" },
+    "logLevel": { "type": "string", "enum": ["debug", "warn", "error"] },
+    "define": { "type": "object", "additionalProperties": true },
+    "loader": { "type": "object", "additionalProperties": { "type": "string" } },
+    "telemetry": { "type": "boolean" },
+    "env": { "type": ["boolean", "object"], "additionalProperties": true },
+    "console": { "type": "object", "additionalProperties": true },
+    "run": { "type": "object", "additionalProperties": true }
+  },
+  "additionalProperties": true
+}

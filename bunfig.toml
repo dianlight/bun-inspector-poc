@@ -1,2 +1,4 @@
+#:schema ./bunfig.schema.json
+
 [serve.static]
 plugins = ["./inspector-plugin-default.ts"]

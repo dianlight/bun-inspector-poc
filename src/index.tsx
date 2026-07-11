@@ -1,6 +1,3 @@
-import { createRoot } from "react-dom/client";
-import { App } from "./App";
-
 // DevInspector from the `/next` export is a plain `useEffect`-based React component
 // that works in any React 19 app regardless of bundler.
 //
@@ -12,8 +9,11 @@ import { App } from "./App";
 // It is guarded by window.__DEV_INSPECTOR_LOADED__ so hot reloads never double-mount.
 // Source: packages/unplugin-dev-inspector/src/next.tsx
 import { DevInspector } from "@mcpc-tech/unplugin-dev-inspector-mcp/next";
+import { createRoot } from "react-dom/client";
+import { App } from "./App";
 
-const container = document.getElementById("root")!;
+const container = document.getElementById("root");
+if (container){
 const root = createRoot(container);
 
 root.render(
@@ -27,3 +27,4 @@ root.render(
     />
   </>,
 );
+}
