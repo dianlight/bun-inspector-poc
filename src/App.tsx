@@ -29,14 +29,13 @@ function Counter({ label }: { label: string }) {
       <p style={{ margin: "0 0 0.75rem", fontSize: 16 }}>
         {label}: <strong>{count}</strong>
       </p>
-      <button
+      <input type="button"
+        value="Increment"
         style={hovered ? buttonHoverStyle : buttonStyle}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
         onClick={() => setCount((c) => c + 1)}
-      >
-        Increment
-      </button>
+        />
     </div>
   );
 }
