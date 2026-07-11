@@ -32,33 +32,42 @@ const {
 } = configUpdater;
 
 // ─── Stdio interceptor ────────────────────────────────────────────────────────
-// Mirrors the logic in src/utils/stdio-interceptor.ts (unplugin) but runs
-// in-process so addStdioLog writes to the same array GET /__inspector__/stdio reads.
+// In Bun, console.log does NOT go through process.stdout.write (unlike Node.js),
+// so we hook console methods directly to capture output into the stdioLogs store.
 
 let isIntercepting = false;
 
 function initStdioInterceptor() {
   if (isIntercepting) return;
-  const origStdout = process.stdout.write.bind(process.stdout);
-  const origStderr = process.stderr.write.bind(process.stderr);
+  isIntercepting = true;
 
-  const toText = (chunk: unknown): string =>
-    typeof chunk === "string" ? chunk : String(chunk);
+  const origLog = console.log;
+  const origWarn = console.warn;
+  const origError = console.error;
+  const origInfo = console.info;
+  const origDebug = console.debug;
 
-  const wrapWrite =
-    (stream: "stdout" | "stderr", original: typeof origStdout) =>
-    (chunk: any, ...args: any[]) => {
+  const capture = (
+    stream: "stdout" | "stderr",
+    original: typeof console.log,
+  ) =>
+    (...args: unknown[]) => {
       try {
-        addStdioLog(stream, toText(chunk));
+        const text = args
+          .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
+          .join(" ");
+        addStdioLog(stream, text);
       } catch {
         // swallow – never break the user's console
       }
-      return original(chunk, ...args);
+      return original.apply(console, args);
     };
 
-  process.stdout.write = wrapWrite("stdout", origStdout) as any;
-  process.stderr.write = wrapWrite("stderr", origStderr) as any;
-  isIntercepting = true;
+  console.log = capture("stdout", origLog) as typeof console.log;
+  console.info = capture("stdout", origInfo) as typeof console.info;
+  console.debug = capture("stdout", origDebug) as typeof console.debug;
+  console.warn = capture("stderr", origWarn) as typeof console.warn;
+  console.error = capture("stderr", origError) as typeof console.error;
 }
 
 // ─── Start inspector server in-process ────────────────────────────────────────
@@ -100,7 +109,6 @@ const app = serve({
   },
 
   fetch(req) {
-    console.error("Nor Found",req);
     return new Response("Not Found", { status: 404 });
   },
 });
