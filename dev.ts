@@ -30,7 +30,7 @@ const inspectorServer = Bun.spawn(
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",
-    env: process.env,
+    env: { ...process.env, DEV_INSPECTOR_DISABLE_CHROME: "1" },
   },
 );
 

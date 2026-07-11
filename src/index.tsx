@@ -23,7 +23,7 @@ root.render(
     <DevInspector
       host="localhost"
       port={6137}
-      disableChrome={false}
+      disableChrome={true}
     />
   </>,
 );
